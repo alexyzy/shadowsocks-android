@@ -24,55 +24,38 @@ import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.VpnService
 import android.os.Bundle
-import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.getSystemService
-import com.crashlytics.android.Crashlytics
-import com.github.shadowsocks.aidl.IShadowsocksService
-import com.github.shadowsocks.bg.BaseService
 import com.github.shadowsocks.core.R
+import com.github.shadowsocks.preference.DataStore
+import com.github.shadowsocks.utils.Key
+import com.github.shadowsocks.utils.StartService
 import com.github.shadowsocks.utils.broadcastReceiver
 
-class VpnRequestActivity : AppCompatActivity(), ShadowsocksConnection.Interface {
-    companion object {
-        private const val TAG = "VpnRequestActivity"
-        private const val REQUEST_CONNECT = 1
-    }
-
+class VpnRequestActivity : AppCompatActivity() {
     private var receiver: BroadcastReceiver? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!BaseService.usingVpnMode) {
+        if (DataStore.serviceMode != Key.modeVpn) {
             finish()
             return
         }
         if (getSystemService<KeyguardManager>()!!.isKeyguardLocked) {
-            receiver = broadcastReceiver { _, _ -> connection.connect() }
+            receiver = broadcastReceiver { _, _ -> connect.launch(null) }
             registerReceiver(receiver, IntentFilter(Intent.ACTION_USER_PRESENT))
-        } else connection.connect()
+        } else connect.launch(null)
     }
 
-    override fun onServiceConnected(service: IShadowsocksService) {
-        val intent = VpnService.prepare(this)
-        if (intent == null) onActivityResult(REQUEST_CONNECT, RESULT_OK, null)
-        else startActivityForResult(intent, REQUEST_CONNECT)
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (resultCode == RESULT_OK) Core.startService() else {
-            Toast.makeText(this, R.string.vpn_permission_denied, Toast.LENGTH_LONG).show()
-            Crashlytics.log(Log.ERROR, TAG, "Failed to start VpnService from onActivityResult: $data")
-        }
+    private val connect = registerForActivityResult(StartService()) {
+        if (it) Toast.makeText(this, R.string.vpn_permission_denied, Toast.LENGTH_LONG).show()
         finish()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        connection.disconnect()
         if (receiver != null) unregisterReceiver(receiver)
     }
 }

@@ -21,10 +21,17 @@
 package com.github.shadowsocks.database
 
 import android.database.sqlite.SQLiteCantOpenDatabaseException
+import android.util.LongSparseArray
+import com.github.shadowsocks.Core
 import com.github.shadowsocks.preference.DataStore
 import com.github.shadowsocks.utils.DirectBoot
-import com.github.shadowsocks.utils.printLog
+import com.github.shadowsocks.utils.forEachTry
+import com.google.gson.JsonStreamParser
+import org.json.JSONArray
+import timber.log.Timber
 import java.io.IOException
+import java.io.InputStream
+import java.io.Serializable
 import java.sql.SQLException
 
 /**
@@ -35,8 +42,18 @@ object ProfileManager {
     interface Listener {
         fun onAdd(profile: Profile)
         fun onRemove(profileId: Long)
+        fun onCleared()
+        fun reloadProfiles()
     }
     var listener: Listener? = null
+
+    data class ExpandedProfile(val main: Profile, val udpFallback: Profile?) : Serializable {
+        companion object {
+            private const val serialVersionUID = 1L
+        }
+
+        fun toList() = listOfNotNull(main, udpFallback)
+    }
 
     @Throws(SQLException::class)
     fun createProfile(profile: Profile = Profile()): Profile {
@@ -45,6 +62,33 @@ object ProfileManager {
         profile.id = PrivateDatabase.profileDao.create(profile)
         listener?.onAdd(profile)
         return profile
+    }
+
+    fun createProfilesFromJson(jsons: Sequence<InputStream>, replace: Boolean = false) {
+        val profiles = if (replace) getAllProfiles()?.associateBy { it.formattedAddress } else null
+        val feature = if (replace) {
+            profiles?.values?.singleOrNull { it.id == DataStore.profileId }
+        } else Core.currentProfile?.main
+        val lazyClear = lazy { clear() }
+        jsons.asIterable().forEachTry { json ->
+            Profile.parseJson(JsonStreamParser(json.bufferedReader()).asSequence().single(), feature) {
+                if (replace) {
+                    lazyClear.value
+                    // if two profiles has the same address, treat them as the same profile and copy stats over
+                    profiles?.get(it.formattedAddress)?.apply {
+                        it.tx = tx
+                        it.rx = rx
+                    }
+                }
+                createProfile(it)
+            }
+        }
+    }
+
+    fun serializeToJson(profiles: List<Profile>? = getActiveProfiles()): JSONArray? {
+        if (profiles == null) return null
+        val lookup = LongSparseArray<Profile>(profiles.size).apply { profiles.forEach { put(it.id, it) } }
+        return JSONArray(profiles.map { it.toJson(lookup) }.toTypedArray())
     }
 
     /**
@@ -59,21 +103,25 @@ object ProfileManager {
     } catch (ex: SQLiteCantOpenDatabaseException) {
         throw IOException(ex)
     } catch (ex: SQLException) {
-        printLog(ex)
+        Timber.w(ex)
         null
     }
+
+    @Throws(IOException::class)
+    fun expand(profile: Profile) = ExpandedProfile(profile, profile.udpFallback?.let { getProfile(it) })
 
     @Throws(SQLException::class)
     fun delProfile(id: Long) {
         check(PrivateDatabase.profileDao.delete(id) == 1)
         listener?.onRemove(id)
-        if (id == DataStore.profileId && DataStore.directBootAware) DirectBoot.clean()
+        if (id in Core.activeProfileIds && DataStore.directBootAware) DirectBoot.clean()
     }
 
     @Throws(SQLException::class)
     fun clear() = PrivateDatabase.profileDao.deleteAll().also {
         // listener is not called since this won't be used in mobile submodule
         DirectBoot.clean()
+        listener?.onCleared()
     }
 
     @Throws(IOException::class)
@@ -83,19 +131,29 @@ object ProfileManager {
         } catch (ex: SQLiteCantOpenDatabaseException) {
             throw IOException(ex)
         } catch (ex: SQLException) {
-            printLog(ex)
+            Timber.w(ex)
             false
         }
         if (!nonEmpty) DataStore.profileId = createProfile().id
     }
 
     @Throws(IOException::class)
-    fun getAllProfiles(): List<Profile>? = try {
-        PrivateDatabase.profileDao.list()
+    fun getActiveProfiles(): List<Profile>? = try {
+        PrivateDatabase.profileDao.listActive()
     } catch (ex: SQLiteCantOpenDatabaseException) {
         throw IOException(ex)
     } catch (ex: SQLException) {
-        printLog(ex)
+        Timber.w(ex)
+        null
+    }
+
+    @Throws(IOException::class)
+    fun getAllProfiles(): List<Profile>? = try {
+        PrivateDatabase.profileDao.listAll()
+    } catch (ex: SQLiteCantOpenDatabaseException) {
+        throw IOException(ex)
+    } catch (ex: SQLException) {
+        Timber.w(ex)
         null
     }
 }
